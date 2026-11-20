@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MedAssist</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:760px;margin:20px auto;padding:0 12px;color:#222}
+  .warn{background:#fff3cd;padding:8px;border-radius:6px;font-size:14px}
+  .card{border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0}
+  input,textarea,button{font:inherit;padding:8px;margin:4px 0}
+  input,textarea{width:100%;box-sizing:border-box}
+  button{cursor:pointer}
+  nav button{margin-right:6px}
+  .hidden{display:none}
+  .u{text-align:right;margin:8px 0}
+  .b{text-align:left;margin:8px 0}
+  .u span,.b span{display:inline-block;padding:8px 12px;border-radius:8px;white-space:pre-wrap;max-width:85%;text-align:left}
+  .u span{background:#d9ecff}.b span{background:#eee}
+  .urgent{color:#b00020;font-weight:bold}
+  pre{white-space:pre-wrap;background:#f7f7f7;padding:8px;border-radius:6px}
+  small{color:#555}
+</style>
+</head>
+<body>
+<h2>MedAssist</h2>
+<p class="warn">Information générale basée sur des notices. Ce n'est pas un avis médical. En cas d'urgence : appelez le 190.</p>
+
+<div id="auth" class="card hidden">
+  <h3>Connexion</h3>
+  <input id="email" type="email" placeholder="Email">
+  <input id="password" type="password" placeholder="Mot de passe (8 caractères minimum)">
+  <input id="name" placeholder="Nom complet (pour l'inscription)">
+  <label><input type="checkbox" id="consent" style="width:auto"> J'accepte le traitement de mes données de santé pour ce service</label>
+  <div><button onclick="login()">Se connecter</button> <button onclick="register()">Créer un compte patient</button></div>
+  <p id="authErr" class="urgent"></p>
+</div>
+
+<div id="app" class="hidden">
+  <nav id="nav"></nav>
+  <p><span id="who"></span> <button onclick="logout()">Déconnexion</button></p>
+
+  <div class="tab hidden" id="tab-chat">
+    <div id="msgs"></div>
+    <input id="q" maxlength="500" placeholder="Posez une question sur un médicament..." onkeydown="if(event.key==='Enter')sendChat()">
+    <button id="send" onclick="sendChat()">Envoyer</button>
+  </div>
+
+  <div class="tab hidden" id="tab-symptoms">
+    <h3>Décrire mes symptômes</h3>
+    <textarea id="sym" rows="4" placeholder="Décrivez ce que vous ressentez"></textarea>
+    <input id="dur" type="number" min="0" placeholder="Durée (en jours)">
+    <input id="sev" type="number" min="1" max="10" placeholder="Intensité (1 à 10)">
+    <input id="age" type="number" min="0" max="120" placeholder="Âge">
+    <button onclick="sendSymptoms()">Envoyer au médecin</button>
+    <p id="symRes"></p>
+  </div>
+
+  <div class="tab hidden" id="tab-mine"><h3>Mes consultations</h3><div id="mineList"></div></div>
+
+  <div class="tab hidden" id="tab-record">
+    <h3>Mon dossier</h3>
+    <textarea id="allergies" rows="2" placeholder="Allergies"></textarea>
+    <textarea id="treatments" rows="2" placeholder="Traitements en cours"></textarea>
+    <button onclick="saveRecord()">Enregistrer</button> <span id="recRes"></span>
+  </div>
+
+  <div class="tab hidden" id="tab-doctor"><h3>Cas à traiter (urgents en premier)</h3><div id="docList"></div></div>
+  <div class="tab hidden" id="tab-audit"><h3>Journal d'audit</h3><pre id="auditBox"></pre></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let token = null, role = null;
+
+function el(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  Object.assign(e, props);
+  kids.forEach(k => e.append(k));
+  return e;
+}
+const FIELDS = {
+  full_name: "nom complet (2 caractères minimum)", password: "mot de passe (8 à 72 caractères)",
+  email: "email", consent: "consentement", question: "question", symptoms: "symptômes (5 caractères minimum)",
+  duration_days: "durée en jours", severity: "intensité (1 à 10)", age: "âge (0 à 120)",
+  reply: "réponse", allergies: "allergies", treatments: "traitements",
+};
+const srcText = sources => "Sources : " + sources.map(s => `${s.drug}, ${s.ref}`).join(" ; ");
+
+async function api(path, opts = {}) {
+  const headers = {"Content-Type": "application/json", ...(token ? {Authorization: "Bearer " + token} : {})};
+  const res = await fetch("/api" + path, {...opts, headers});
+  if (res.status === 401 && token) logout();
+  if (!res.ok) {
+    let m = "Erreur";
+    try { m = (await res.json()).detail || m; } catch {}
+    if (Array.isArray(m)) {
+      const names = m.map(x => FIELDS[(x.loc || []).slice(-1)[0]] || "un champ");
+      m = "Vérifiez : " + [...new Set(names)].join(", ");
+    }
+    throw new Error(m);
+  }
+  return res;
+}
+
+// ----- Authentification -----
+async function authCall(path, body) {
+  try {
+    const d = await (await api(path, {method: "POST", body: JSON.stringify(body)})).json();
+    sessionStorage.setItem("token", d.token);
+    sessionStorage.setItem("role", d.role);
+    sessionStorage.setItem("name", d.name);
+    $("authErr").textContent = "";
+    start();
+  } catch (e) { $("authErr").textContent = e.message; }
+}
+const login = () => authCall("/auth/login", {email: $("email").value, password: $("password").value});
+const register = () => authCall("/auth/register", {email: $("email").value, password: $("password").value,
+  full_name: $("name").value, consent: $("consent").checked});
+function logout() { sessionStorage.clear(); start(); }
+
+// ----- Navigation -----
+const tabs = {
+  patient: [["chat", "Chat"], ["symptoms", "Symptômes"], ["mine", "Mes consultations"], ["record", "Mon dossier"]],
+  doctor: [["doctor", "Cas à traiter"]],
+  admin: [["audit", "Journal d'audit"]],
+};
+const loaders = {mine: loadMine, record: loadRecord, doctor: loadDoctor, audit: loadAudit};
+
+function start() {
+  token = sessionStorage.getItem("token");
+  role = sessionStorage.getItem("role");
+  $("auth").classList.toggle("hidden", !!token);
+  $("app").classList.toggle("hidden", !token);
+  if (!token) return;
+  $("who").textContent = sessionStorage.getItem("name") + " (" + role + ")";
+  const nav = $("nav"); nav.replaceChildren();
+  tabs[role].forEach(([id, label]) => nav.append(el("button", {textContent: label, onclick: () => show(id)})));
+  show(tabs[role][0][0]);
+}
+function show(id) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.add("hidden"));
+  $("tab-" + id).classList.remove("hidden");
+  if (loaders[id]) loaders[id]().catch(e => alert(e.message));
+  if (id === "chat") loadHistory();
+}
+
+// ----- Chat (streaming) -----
+function addMsg(who, text, sources) {
+  const span = el("span", {textContent: text});
+  const box = el("div", {className: who}, span);
+  if (sources && sources.length) box.append(el("div", {}, el("small", {textContent: srcText(sources)})));
+  $("msgs").append(box);
+  return span;
+}
+async function loadHistory() {
+  $("msgs").replaceChildren();
+  try {
+    (await (await api("/chat/history")).json()).forEach(m => addMsg(m.role === "user" ? "u" : "b", m.text, m.sources));
+  } catch {}
+}
+async function sendChat() {
+  const q = $("q").value.trim();
+  if (!q) return;
+  $("q").value = "";
+  addMsg("u", q);
+  const bot = addMsg("b", "");
+  $("send").disabled = true;
+  try {
+    const res = await api("/chat", {method: "POST", body: JSON.stringify({question: q})});
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const events = buf.split("\n\n");
+      buf = events.pop();
+      for (const ev of events) {
+        const type = (ev.match(/^event: (.*)$/m) || [])[1];
+        const data = JSON.parse((ev.match(/^data: (.*)$/m) || [])[1] || "{}");
+        if (type === "token" || type === "error") bot.textContent += data.t;
+        if (type === "sources") bot.parentElement.append(el("div", {}, el("small", {textContent: srcText(data)})));
+      }
+    }
+  } catch (e) { bot.textContent = e.message; }
+  $("send").disabled = false;
+}
+
+// ----- Symptômes, consultations, dossier -----
+async function sendSymptoms() {
+  try {
+    const d = await (await api("/consultations", {method: "POST", body: JSON.stringify({
+      symptoms: $("sym").value, duration_days: +$("dur").value, severity: +$("sev").value, age: +$("age").value})})).json();
+    $("symRes").textContent = d.message;
+    $("symRes").className = d.urgency === "urgent" ? "urgent" : "";
+  } catch (e) { $("symRes").textContent = e.message; }
+}
+async function loadMine() {
+  const list = await (await api("/consultations/mine")).json();
+  const box = $("mineList"); box.replaceChildren();
+  if (!list.length) box.append(el("p", {textContent: "Aucune consultation pour le moment."}));
+  list.forEach(c => box.append(el("div", {className: "card"},
+    el("b", {textContent: `#${c.id} · ${c.created_at} · ${c.urgency} · ${c.status}`}),
+    el("p", {textContent: c.reply || "En attente de la réponse du médecin."}))));
+}
+async function loadRecord() {
+  const r = await (await api("/me/record")).json();
+  $("allergies").value = r.allergies; $("treatments").value = r.treatments;
+}
+async function saveRecord() {
+  try {
+    await api("/me/record", {method: "PUT", body: JSON.stringify({allergies: $("allergies").value, treatments: $("treatments").value})});
+    $("recRes").textContent = "Enregistré";
+  } catch (e) { $("recRes").textContent = e.message; }
+}
+
+// ----- Médecin et admin -----
+async function loadDoctor() {
+  const list = await (await api("/doctor/consultations")).json();
+  const box = $("docList"); box.replaceChildren();
+  if (!list.length) box.append(el("p", {textContent: "Aucun cas en attente."}));
+  list.forEach(c => {
+    const ta = el("textarea", {rows: 3, placeholder: "Réponse du médecin"});
+    box.append(el("div", {className: "card"},
+      el("b", {className: c.urgency === "urgent" ? "urgent" : "", textContent: `#${c.id} · ${c.urgency} · ${c.patient} · ${c.created_at}`}),
+      el("pre", {textContent: c.summary}),
+      ta,
+      el("button", {textContent: "Valider et répondre", onclick: async () => {
+        try { await api(`/doctor/consultations/${c.id}/reply`, {method: "POST", body: JSON.stringify({reply: ta.value})}); loadDoctor(); }
+        catch (e) { alert(e.message); }
+      }})));
+  });
+}
+async function loadAudit() {
+  const rows = await (await api("/admin/audit")).json();
+  $("auditBox").textContent = rows.map(r => `${r.time}  user=${r.user}  ${r.action}  ${r.target}`).join("\n");
+}
+
+start();
+</script>
+</body>
+</html>

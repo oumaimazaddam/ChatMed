@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+psycopg[binary]
+httpx
+chromadb
+pypdf
+pyjwt
+bcrypt
+cryptography
+python-dotenv
+scikit-learn
+joblib
+psycopg2-binary
