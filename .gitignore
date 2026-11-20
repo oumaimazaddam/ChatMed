@@ -1,5 +1,25 @@
+# Environment & secrets
 .env
+.env.*
+!.env.example
+
+# Virtual environments
 venv/
+.venv/
+env/
+
+# Databases & vector stores
 medassist.db
+*.db
+*.sqlite3
 chroma_db/
+chroma_db.backup/
+data/
+
+# Python artifacts
 __pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
